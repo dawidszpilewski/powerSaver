@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  powersaver:
+    build: .
+    container_name: powersaver
+    restart: unless-stopped
+
+    # Port lokalny: z zewnątrz 8000 -> w kontenerze 8000
+    ports:
+      - "8000:8000"
+
+    # Volumes:
+    # - baza danych i dane trwałe
+    # - (opcjonalnie) cały katalog app, jeśli chcesz szybko podmieniać szablony
+    volumes:
+      - ./data:/app/data
+      # - ./app:/app/app   # opcjonalne, jeśli chcesz rozwijać UI „na żywo”
+
+    # Zmienne środowiskowe z pliku .env
+    env_file:
+      - .env
+
+    # Sieć – standardowy bridge; kontener widzi LAN (zależnie od Synology)
+    # na Synology możesz ewentualnie ustawić macvlan / host, jeśli będzie problem
+    # z dostępem do WinRM w LAN
+    # network_mode: bridge

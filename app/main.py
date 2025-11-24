@@ -1,29 +1,49 @@
-# app/main.py
+from pathlib import Path
+from datetime import date, datetime
+
 from fastapi import FastAPI, Depends, Request, Form, HTTPException
 from fastapi.responses import RedirectResponse
-from .winrm_utils import shutdown_via_winrm
-
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from datetime import date
-from .winrm_utils import get_winrm_info
 
 from .database import Base, engine, get_db
 from . import crud, schemas
 from .scheduler import start_scheduler, scan_network
 from .config import settings
+from .winrm_utils import shutdown_via_winrm, get_winrm_info
 
-from datetime import datetime
 
-# Tworzenie tabel
+# --- Inicjalizacja bazy ---
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="PC Manager")
+# --- Aplikacja FastAPI ---
+app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
-templates = Jinja2Templates(directory="app/templates")
+# Ścieżki oparte na położeniu pliku main.py
+BASE_DIR = Path(__file__).parent
+STATIC_DIR = BASE_DIR / "static"
+TEMPLATES_DIR = BASE_DIR / "templates"
 
+# Statyczne pliki (favicon, logo, custom.js, itp.)
+app.mount(
+    "/static",
+    StaticFiles(directory=str(STATIC_DIR)),
+    name="static",
+)
+
+# Szablony Jinja2
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+# --- Start schedulerów przy starcie aplikacji ---
+@app.on_event("startup")
+async def on_startup():
+    # Harmonogram: skan + nocne wyłączanie
+    start_scheduler()
+
+
+# --- Endpoint: ręczne wyłączenie komputera ---
 @app.post("/computers/{computer_id}/shutdown_manual")
 def shutdown_manual(
     computer_id: int,
@@ -57,6 +77,8 @@ def shutdown_manual(
 
     return RedirectResponse("/", status_code=303)
 
+
+# --- Endpoint: debug WinRM dla jednego IP ---
 @app.get("/debug-winrm/{ip}")
 def debug_winrm(ip: str):
     """
@@ -72,15 +94,22 @@ def debug_winrm(ip: str):
         "error": err,
     }
 
-@app.get("/scan-now")
-def scan_now():
-    """
-    Ręczne odpalenie skanowania sieci.
-    Niczego nie wyłącza, tylko szuka komputerów po WinRM.
-    """
-    scan_network()
-    return {"status": "ok", "message": "Scan finished"}
 
+# --- Endpoint: ręczne skanowanie sieci ---
+@app.post("/scan-now")
+def scan_now(password: str = Form(...)):
+    """
+    Ręczne wyzwolenie skanowania sieci.
+    Wymaga hasła ADMIN_TOGGLE_PASSWORD.
+    """
+    if password != settings.ADMIN_TOGGLE_PASSWORD:
+        raise HTTPException(status_code=403, detail="Niepoprawne haslo")
+
+    scan_network()
+    return RedirectResponse("/", status_code=303)
+
+
+# --- Endpoint: zmiana statusu komputera (managed / exception) ---
 @app.post("/computers/{computer_id}/set_status")
 def set_status(
     computer_id: int,
@@ -90,20 +119,19 @@ def set_status(
 ):
     """
     Zmiana statusu komputera:
-      - found     -> 'Znaleziony'
-      - managed   -> 'Zarządzany'
-      - exception -> 'Wyjątek'
-    Zabezpieczona hasłem ADMIN_TOGGLE_PASSWORD z .env
+    - managed
+    - exception
+    (status 'found' zostaje tylko z auto-skanu)
     """
     if password != settings.ADMIN_TOGGLE_PASSWORD:
         raise HTTPException(status_code=403, detail="Niepoprawne haslo")
 
+    if status not in ["managed", "exception"]:
+        raise HTTPException(status_code=400, detail="Niepoprawny status")
+
     comp = crud.get_computer(db, computer_id)
     if not comp:
         raise HTTPException(status_code=404, detail="Computer not found")
-
-    if status not in ["found", "managed", "exception"]:
-        raise HTTPException(status_code=400, detail="Niepoprawny status")
 
     update = schemas.ComputerUpdate(status=status)
     crud.update_computer(db, comp, update)
@@ -111,17 +139,20 @@ def set_status(
     return RedirectResponse("/", status_code=303)
 
 
-@app.on_event("startup")
-async def on_startup():
-    start_scheduler()
-
-
+# --- Widok główny ---
 @app.get("/")
 def index(request: Request, db: Session = Depends(get_db)):
+    """
+    Strona główna GUI:
+    - tabela wszystkich komputerów
+    - nowo znalezione (unapproved)
+    - ostatnie logi wyłączeń
+    """
     computers = crud.get_all_computers(db)
     unapproved = crud.get_unapproved_computers(db)
     logs = crud.get_recent_shutdown_logs(db, limit=20)
     today = date.today()
+
     return templates.TemplateResponse(
         "index.html",
         {
@@ -134,6 +165,7 @@ def index(request: Request, db: Session = Depends(get_db)):
     )
 
 
+# --- Endpoint: "Nie wyłączaj dziś" ---
 @app.post("/computers/{computer_id}/exclude_today")
 def exclude_today(
     computer_id: int,
@@ -141,6 +173,10 @@ def exclude_today(
     reason: str = Form(""),
     db: Session = Depends(get_db),
 ):
+    """
+    Zapisuje w bazie, że dany komputer ma być pominięty przy
+    dzisiejszym nocnym wyłączaniu.
+    """
     comp = crud.get_computer(db, computer_id)
     if not comp:
         raise HTTPException(status_code=404, detail="Computer not found")
