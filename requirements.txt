@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+pydantic-settings
+jinja2
+python-nmap
+pywinrm
+requests-ntlm
+APScheduler
+python-multipart

@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-SQLAlchemy
-alembic
-python-multipart
-jinja2
-apscheduler
-pywinrm
-
