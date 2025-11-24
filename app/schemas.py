@@ -9,13 +9,13 @@ class ComputerBase(BaseModel):
     ip: str
     os_name: Optional[str] = None
     winrm_ok: bool = False
-    managed: bool = False
-    approved: bool = False
-    is_server: bool = False
-    status: str = "found"
-    last_seen: Optional[datetime] = None
-    last_user: Optional[datetime] = None
 
+    # Pole główne do zarządzania
+    status: str = "found"  # found / managed / exception
+
+    is_server: bool = False
+    last_seen: Optional[datetime] = None
+    last_user: Optional[str] = None
 
 
 class ComputerCreate(ComputerBase):
@@ -24,16 +24,13 @@ class ComputerCreate(ComputerBase):
 
 class ComputerUpdate(BaseModel):
     hostname: Optional[str] = None
-    managed: Optional[bool] = None
-    approved: Optional[bool] = None
-    is_server: Optional[bool] = None
-    winrm_ok: Optional[bool] = None
-    last_seen: Optional[datetime] = None
-    last_user: Optional[str] = None
     os_name: Optional[str] = None
     ip: Optional[str] = None
+    winrm_ok: Optional[bool] = None
     status: Optional[str] = None
-
+    is_server: Optional[bool] = None
+    last_seen: Optional[datetime] = None
+    last_user: Optional[str] = None
 
 
 class ComputerOut(ComputerBase):

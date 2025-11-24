@@ -13,9 +13,12 @@ def get_winrm_info(ip: str) -> Tuple[bool, Optional[str], Optional[str], Optiona
     Pobiera informacje przez WinRM:
       - success: czy połączenie udane
       - hostname: nazwa komputera (np. NAZWA-PC)
-      - current_user: zalogowany użytkownik (DOMENA\\user albo PC\\user)
-      - error_message: opis błędu, jeśli wystąpił
+      - user: zalogowany użytkownik (np. DOMENA\\uzytkownik)
+      - error: treść błędu (jeśli success=False)
     """
+    if not WINRM_USER or not WINRM_PASSWORD:
+        return False, None, None, "Brak konfiguracji WINRM_USER/WINRM_PASSWORD"
+
     try:
         session = winrm.Session(
             f"http://{ip}:5985/wsman",
@@ -23,27 +26,17 @@ def get_winrm_info(ip: str) -> Tuple[bool, Optional[str], Optional[str], Optiona
             transport="ntlm",
         )
 
-        ps_script = r"""
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
-        $name = $cs.Name
-        $user = $cs.UserName
-        "$name|$user"
-        """
+        # Hostname
+        r_host = session.run_cmd("hostname")
+        if r_host.status_code != 0:
+            return False, None, None, r_host.std_err.decode(errors="ignore") or "hostname cmd failed"
+        hostname = r_host.std_out.decode(errors="ignore").strip()
 
-        result = session.run_ps(ps_script)
-
-        if result.status_code != 0:
-            err = result.std_err.decode(errors="ignore") or "WinRM error"
-            return False, None, None, err
-
-        out = result.std_out.decode(errors="ignore").strip()
-        if "|" in out:
-            hostname, user = out.split("|", 1)
-        else:
-            hostname, user = out, None
-
-        hostname = hostname.strip() or None
-        user = user.strip() or None
+        # Zalogowany użytkownik
+        r_user = session.run_cmd("whoami")
+        if r_user.status_code != 0:
+            return False, hostname, None, r_user.std_err.decode(errors="ignore") or "whoami cmd failed"
+        user = r_user.std_out.decode(errors="ignore").strip()
 
         return True, hostname, user, None
 
@@ -53,8 +46,12 @@ def get_winrm_info(ip: str) -> Tuple[bool, Optional[str], Optional[str], Optiona
 
 def shutdown_via_winrm(ip: str) -> Tuple[bool, str]:
     """
-    Wyłącza komputer przez WinRM.
+    Wyłącza komputer po WinRM.
+    Zwraca (success, message).
     """
+    if not WINRM_USER or not WINRM_PASSWORD:
+        return False, "Brak konfiguracji WINRM_USER/WINRM_PASSWORD"
+
     try:
         session = winrm.Session(
             f"http://{ip}:5985/wsman",
