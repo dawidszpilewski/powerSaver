@@ -1,49 +1,40 @@
+# app/main.py
+from datetime import datetime, date
 from pathlib import Path
-from datetime import date, datetime
+from typing import List
 
-from fastapi import FastAPI, Depends, Request, Form, HTTPException
+from fastapi import (
+    FastAPI,
+    Request,
+    Depends,
+    Form,
+    HTTPException,
+)
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
-from . import crud, schemas
-from .scheduler import start_scheduler, scan_network
+from . import crud, schemas, models
 from .config import settings
 from .winrm_utils import shutdown_via_winrm, get_winrm_info
-
+from .scheduler import start_scheduler, scan_network
 
 # --- Inicjalizacja bazy ---
 Base.metadata.create_all(bind=engine)
 
-# --- Aplikacja FastAPI ---
+# --- FastAPI + szablony + statyczne ---
 app = FastAPI()
 
-# Ścieżki oparte na położeniu pliku main.py
-BASE_DIR = Path(__file__).parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATES_DIR = BASE_DIR / "templates"
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
-# Statyczne pliki (favicon, logo, custom.js, itp.)
-app.mount(
-    "/static",
-    StaticFiles(directory=str(STATIC_DIR)),
-    name="static",
-)
-
-# Szablony Jinja2
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# --- Start schedulerów przy starcie aplikacji ---
-@app.on_event("startup")
-async def on_startup():
-    # Harmonogram: skan + nocne wyłączanie
-    start_scheduler()
-
-
-# --- Endpoint: ręczne wyłączenie komputera ---
+# --- Endpoint: ręczne wyłączenie jednego komputera ---
 @app.post("/computers/{computer_id}/shutdown_manual")
 def shutdown_manual(
     computer_id: int,
@@ -51,10 +42,9 @@ def shutdown_manual(
     db: Session = Depends(get_db),
 ):
     """
-    Ręczne wyłączenie komputera przez WinRM.
-    Wymaga podania hasła ADMIN_TOGGLE_PASSWORD z .env.
+    Ręczne wyłączenie jednego komputera po WinRM.
+    Wymaga hasła ADMIN_TOGGLE_PASSWORD.
     """
-    # Sprawdzenie hasła admina
     if password != settings.ADMIN_TOGGLE_PASSWORD:
         raise HTTPException(status_code=403, detail="Niepoprawne haslo")
 
@@ -78,7 +68,7 @@ def shutdown_manual(
     return RedirectResponse("/", status_code=303)
 
 
-# --- Endpoint: debug WinRM dla jednego IP ---
+# --- Debug WinRM dla jednego IP ---
 @app.get("/debug-winrm/{ip}")
 def debug_winrm(ip: str):
     """
@@ -95,7 +85,7 @@ def debug_winrm(ip: str):
     }
 
 
-# --- Endpoint: ręczne skanowanie sieci ---
+# --- Ręczne skanowanie sieci ---
 @app.post("/scan-now")
 def scan_now(password: str = Form(...)):
     """
@@ -109,7 +99,7 @@ def scan_now(password: str = Form(...)):
     return RedirectResponse("/", status_code=303)
 
 
-# --- Endpoint: zmiana statusu komputera (managed / exception) ---
+# --- Zmiana statusu komputera (managed / exception) ---
 @app.post("/computers/{computer_id}/set_status")
 def set_status(
     computer_id: int,
@@ -119,8 +109,8 @@ def set_status(
 ):
     """
     Zmiana statusu komputera:
-    - managed
-    - exception
+    - managed   -> zarządzany, będzie wyłączany o 22:00
+    - exception -> wyjątek, nigdy nie wyłączamy automatycznie
     (status 'found' zostaje tylko z auto-skanu)
     """
     if password != settings.ADMIN_TOGGLE_PASSWORD:
@@ -139,17 +129,23 @@ def set_status(
     return RedirectResponse("/", status_code=303)
 
 
-# --- Widok główny ---
+# --- Startup: scheduler ---
+@app.on_event("startup")
+async def on_startup():
+    # Uwaga: w trybie --reload zobaczysz ten log dwukrotnie (to normalne),
+    # w produkcji (bez reload) tylko raz.
+    start_scheduler()
+
+
+# --- Strona główna GUI ---
 @app.get("/")
 def index(request: Request, db: Session = Depends(get_db)):
     """
     Strona główna GUI:
     - tabela wszystkich komputerów
-    - nowo znalezione (unapproved)
     - ostatnie logi wyłączeń
     """
-    computers = crud.get_all_computers(db)
-    unapproved = crud.get_unapproved_computers(db)
+    computers: List[models.Computer] = crud.get_all_computers(db)
     logs = crud.get_recent_shutdown_logs(db, limit=20)
     today = date.today()
 
@@ -158,7 +154,6 @@ def index(request: Request, db: Session = Depends(get_db)):
         {
             "request": request,
             "computers": computers,
-            "unapproved": unapproved,
             "logs": logs,
             "today": today,
         },
