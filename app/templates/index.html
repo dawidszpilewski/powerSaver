@@ -1,225 +1,214 @@
 {% extends "base.html" %}
 
-{% block title %}Usługa wyłączenia komputera{% endblock %}
+{% block title %}PowerSaver – wyłączanie komputerów{% endblock %}
 
 {% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-10 col-xl-9">
 
-<!-- Nagłówek podobny do usługi WOL -->
-<div class="text-center mb-4">
-    <img src="{{ url_for('static', path='primes.png') }}"
-         alt="Logo"
-         style="width: 500px; max-width: 100%; height: auto;">
-    <h1 class="mt-4">Usługa wyłączenia komputera</h1>
-</div>
-
-<!-- Hasło administratora (globalne) -->
-<div class="card mb-3">
-    <div class="card-body d-flex flex-wrap align-items-center gap-3">
-        <div>
-            <h5 class="card-title mb-1">Hasło administratora</h5>
-            <p class="text-muted small mb-0">
-                Wpisz hasło, aby odblokować zmianę trybu, ręczne wyłączanie oraz skanowanie sieci.
+        <div class="text-center mb-4">
+            <img src="{{ url_for('static', path='primes.png') }}"
+                 alt="Logo"
+                 style="max-width: 420px; width: 100%; height: auto;">
+            <h1 class="mt-4 mb-2 h3 fw-bold">
+                Usługa wyłączenia komputerów poza godzinami pracy
+            </h1>
+            <p class="text-muted mb-0">
+                Komputery wykryte w sieci lokalnej i objęte procedurą automatycznego wyłączania o godzinie
+                <strong>{{ shutdown_hour.strftime('%H:%M') }}</strong>.
             </p>
         </div>
-        <div class="ms-auto d-flex flex-wrap align-items-center gap-2">
-            <input type="password"
-                   id="adminPassword"
-                   class="form-control form-control-sm"
-                   placeholder="Hasło admina">
-            <button type="button"
-                    class="btn btn-sm btn-outline-secondary"
-                    id="clearAdminPassword">
-                Wyczyść
-            </button>
-        </div>
-    </div>
-</div>
 
-<!-- Ręczny skan – też na hasło -->
-<form method="post" action="/scan-now" class="mb-3">
-    <input type="hidden" name="password" class="admin-password-field">
-    <button class="btn btn-primary requires-admin" type="submit" disabled>
-        Skanuj teraz sieć (WinRM)
-    </button>
-</form>
-
-<!-- Podsumowanie -->
-<div class="row mb-4">
-    <div class="col-md-4">
-        <div class="card border-0">
+        <!-- Panel sterowania -->
+        <div class="card mb-4">
             <div class="card-body">
-                <h5 class="card-title">Podsumowanie</h5>
-                <p class="card-text mb-1">
-                    Wszystkich komputerów:
-                    <strong>{{ computers|length }}</strong>
-                </p>
-                <p class="card-text mb-1">
-                    WinRM OK:
-                    <strong>{{ computers|selectattr("winrm_ok")|list|length }}</strong>
-                </p>
-                <p class="card-text text-muted small mb-0">
-                    Dzisiejsza data: {{ today }}
-                </p>
+                <form class="row g-3 align-items-center mb-3">
+                    <div class="col-auto">
+                        <label class="col-form-label fw-semibold">Hasło administratora:</label>
+                    </div>
+                    <div class="col-auto">
+                        <input type="password"
+                               id="adminPasswordInput"
+                               class="form-control form-control-sm"
+                               placeholder="••••••">
+                    </div>
+                    <div class="col-auto">
+                        <button type="button"
+                                id="clearAdminPassword"
+                                class="btn btn-outline-secondary btn-sm">
+                            Wyczyść
+                        </button>
+                    </div>
+                    <div class="col text-end small text-muted">
+                        Wymagane do zmiany statusów, dodawania wyjątków i wyłączania komputerów.
+                    </div>
+                </form>
+
+                <div class="d-flex flex-wrap align-items-center justify-content-between mb-3">
+                    <div class="mb-2">
+                        <!-- Skan teraz -->
+                        <form method="post" action="/scan-now" class="d-inline">
+                            <input type="hidden" name="password" class="admin-password-field">
+                            <button type="submit" class="btn btn-outline-primary btn-sm requires-admin">
+                                Skanuj teraz sieć
+                            </button>
+                        </form>
+
+                        <!-- Ręczne globalne wyłączenie -->
+                        <form method="post" action="/shutdown-now" class="d-inline ms-2">
+                            <input type="hidden" name="password" class="admin-password-field">
+                            <button type="submit" class="btn btn-outline-danger btn-sm requires-admin">
+                                Wyłącz zarządzane komputery teraz
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Sprawdzenie statusu online na żądanie -->
+                <div class="mb-2">
+                    <button type="button" id="checkOnlineButton" class="btn btn-outline-primary btn-sm">
+                        Sprawdź status online (ping)
+                    </button>
+                    <span id="checkOnlineInfo" class="ms-2 text-muted small"></span>
+                </div>
+
+                <div class="small text-muted">
+                    <strong>Legenda:</strong>
+                    <ul class="mb-0">
+                        <li><span class="badge bg-danger">Znaleziony, niezarządzany</span> – komputer wykryty, ale nie zaznaczony jako zarządzany.</li>
+                        <li><span class="badge bg-success">Zarządzany</span> – komputer objęty automatycznym wyłączaniem.</li>
+                        <li><span class="badge bg-warning text-dark">Wyjątek</span> – ustawiony wyjątek na dziś (po naciśnięciu przycisku „Wyjątek”).</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabela komputerów -->
+        <div class="card">
+            <div class="card-body">
+                {% if not computers %}
+                    <p class="mb-0 text-muted text-center">
+                        Brak komputerów w bazie. Uruchom skanowanie sieci, aby wykryć urządzenia.
+                    </p>
+                {% else %}
+                    <div class="table-responsive mb-0">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                            <tr>
+                                <th style="width: 22%;">Nazwa / Host</th>
+                                <th style="width: 11%;">IP</th>
+                                <th style="width: 11%;">OS</th>
+                                <th style="width: 10%;">Zarządzany</th>
+                                <th style="width: 11%;">Status WinRM</th>
+                                <th style="width: 13%;">Ostatnio widziany</th>
+                                <th style="width: 12%;">Ostatnio zalogowany</th>
+                                <th style="width: 10%;">Status online</th>
+                                <th style="width: 20%;">Wyjątek (dzisiaj)</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for c in computers %}
+                                {% set st = c.status or "found" %}
+                                <tr>
+                                    <!-- Nazwa / Host -->
+                                    <td>
+                                        <strong>
+                                            {{ c.display_name or c.hostname or "Brak nazwy" }}
+                                        </strong><br>
+                                        <code class="small text-muted">
+                                            {{ c.hostname or "-" }}
+                                        </code>
+                                    </td>
+
+                                    <!-- IP -->
+                                    <td><code class="small">{{ c.ip or "?" }}</code></td>
+
+                                    <!-- OS -->
+                                    <td>{{ c.os_type or "-" }}</td>
+
+                                    <!-- Zarządzany (kwadracik) -->
+                                    <td class="text-center {% if st != 'managed' %}bg-danger-subtle{% endif %}">
+                                        <form method="post"
+                                              action="/computers/{{ c.id }}/set_status"
+                                              class="d-inline">
+                                            <input type="hidden" name="password" class="admin-password-field">
+                                            <!-- wysyłamy nowy status: jeśli teraz managed -> found, jeśli nie -> managed -->
+                                            <input type="hidden"
+                                                   name="status"
+                                                   value="{% if st == 'managed' %}found{% else %}managed{% endif %}">
+                                            <button type="submit"
+                                                    class="btn btn-sm requires-admin
+                                                        {% if st == 'managed' %}
+                                                            btn-success
+                                                        {% else %}
+                                                            btn-outline-danger
+                                                        {% endif %}">
+                                                {% if st == 'managed' %}■{% else %}■{% endif %}
+                                            </button>
+                                        </form>
+                                    </td>
+
+                                    <!-- WinRM -->
+                                    <td>
+                                        {% if c.winrm_status == "ok" %}
+                                            <span class="badge bg-success">OK</span>
+                                        {% elif c.winrm_status %}
+                                            <span class="badge bg-danger">Błąd</span>
+                                        {% else %}
+                                            <span class="badge bg-secondary">?</span>
+                                        {% endif %}
+                                    </td>
+
+                                    <!-- Ostatnio widziany -->
+                                    <td>
+                                        {% if c.last_seen %}
+                                            <span class="small">
+                                                {{ c.last_seen.strftime("%Y-%m-%d %H:%M") }}
+                                            </span>
+                                        {% else %}
+                                            <span class="text-muted small">brak danych</span>
+                                        {% endif %}
+                                    </td>
+
+                                    <!-- Ostatnio zalogowany użytkownik -->
+                                    <td class="small">
+                                        {{ c.last_user or "-" }}
+                                    </td>
+
+                                    <!-- Status online (ping na żądanie) -->
+                                    <td>
+                                        <span class="badge bg-secondary online-badge"
+                                              data-computer-id="{{ c.id }}">
+                                            ?
+                                        </span>
+                                    </td>
+
+                                    <!-- Wyjątek na dziś -->
+                                    <td>
+                                        <form method="post"
+                                              action="/computers/{{ c.id }}/exclude_today"
+                                              class="d-flex align-items-center gap-1">
+                                            <input type="hidden" name="password" class="admin-password-field">
+                                            <input type="text"
+                                                   name="user"
+                                                   class="form-control form-control-sm exclusion-user-input"
+                                                   placeholder="Imię i nazwisko"
+                                                   style="min-width: 220px;">
+                                            <button type="submit"
+                                                    class="btn btn-outline-warning btn-sm requires-admin exclusion-button"
+                                                    disabled>
+                                                Wyjątek
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% endif %}
             </div>
         </div>
     </div>
 </div>
-
-<!-- Tabela komputerów -->
-<div class="card mb-4">
-    <div class="card-header">
-        <strong>Wszystkie komputery</strong>
-    </div>
-    <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-hover mb-0 align-middle">
-                <thead class="table-light">
-                <tr>
-                    <th>Status online</th>
-                    <th>Hostname</th>
-                    <th>IP</th>
-                    <th>OS</th>
-                    <th>WinRM</th>
-                    <th>Zalogowany użytkownik</th>
-                    <th>Tryb</th>
-                    <th>Zmień tryb (hasło)</th>
-                    <th>Wyłącz ręcznie (hasło)</th>
-                    <th>Nie wyłączaj dziś</th>
-                </tr>
-                </thead>
-                <tbody>
-                {% for c in computers %}
-                    {% set st = c.status or 'found' %}
-                    <tr>
-                        <!-- Status online -->
-                        <td>
-                            {% if c.last_seen %}
-                                <span class="badge bg-success">ONLINE</span>
-                            {% else %}
-                                <span class="badge bg-secondary">?</span>
-                            {% endif %}
-                        </td>
-
-                        <td>{{ c.hostname }}</td>
-                        <td>{{ c.ip }}</td>
-                        <td>{{ c.os_name or "-" }}</td>
-
-                        <td>
-                            {% if c.winrm_ok %}
-                                <span class="badge bg-success">OK</span>
-                            {% else %}
-                                <span class="badge bg-danger">Brak</span>
-                            {% endif %}
-                        </td>
-
-                        <td>{{ c.last_user or "-" }}</td>
-
-                        <!-- TRYB -->
-                        <td>
-                            {% if st == 'managed' %}
-                                <span class="badge bg-success">Zarządzany</span>
-                            {% elif st == 'exception' %}
-                                <span class="badge bg-secondary">Wyjątek</span>
-                            {% else %}
-                                <span class="badge bg-warning text-dark">Znaleziony</span>
-                            {% endif %}
-                        </td>
-
-                        <!-- Zmień tryb (tylko managed/exception) -->
-                        <td>
-                            <form method="post"
-                                  action="/computers/{{ c.id }}/set_status"
-                                  class="d-flex flex-wrap gap-1">
-                                <select name="status" class="form-select form-select-sm">
-                                    <option value="managed" {% if st == 'managed' %}selected{% endif %}>
-                                        Zarządzany
-                                    </option>
-                                    <option value="exception" {% if st == 'exception' %}selected{% endif %}>
-                                        Wyjątek
-                                    </option>
-                                </select>
-                                <input type="hidden" name="password" class="admin-password-field">
-                                <button class="btn btn-sm btn-outline-primary requires-admin"
-                                        type="submit"
-                                        disabled>
-                                    Zapisz
-                                </button>
-                            </form>
-                        </td>
-
-                        <!-- Wyłącz ręcznie -->
-                        <td>
-                            <form method="post"
-                                  action="/computers/{{ c.id }}/shutdown_manual"
-                                  class="d-flex flex-wrap gap-1"
-                                  onsubmit="return confirm('Na pewno WYŁĄCZYĆ ten komputer?');">
-                                <input type="hidden" name="password" class="admin-password-field">
-                                <button class="btn btn-sm btn-outline-danger requires-admin"
-                                        type="submit"
-                                        disabled>
-                                    Wyłącz
-                                </button>
-                            </form>
-                        </td>
-
-                        <!-- Nie wyłączaj dziś (bez hasła) -->
-                        <td>
-                            <form method="post"
-                                  action="/computers/{{ c.id }}/exclude_today"
-                                  class="d-flex flex-wrap gap-1">
-                                <input type="text" name="user_label"
-                                       class="form-control form-control-sm"
-                                       placeholder="Kto?" required>
-                                <button class="btn btn-sm btn-outline-danger" type="submit">
-                                    Dziś nie wyłączaj
-                                </button>
-                            </form>
-                        </td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<!-- Logi wyłączeń -->
-<div class="card mb-4">
-    <div class="card-header">
-        <strong>Ostatnie logi wyłączeń</strong>
-    </div>
-    <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-sm mb-0">
-                <thead class="table-light">
-                <tr>
-                    <th>Data (planowana)</th>
-                    <th>Komputer</th>
-                    <th>Status</th>
-                    <th>Komunikat</th>
-                </tr>
-                </thead>
-                <tbody>
-                {% for log in logs %}
-                    <tr>
-                        <td>{{ log.scheduled_for }}</td>
-                        <td>{{ log.computer.hostname if log.computer else log.computer_id }}</td>
-                        <td>
-                            {% if 'success' in log.status %}
-                                <span class="badge bg-success">{{ log.status }}</span>
-                            {% elif log.status.startswith('skipped') %}
-                                <span class="badge bg-warning text-dark">{{ log.status }}</span>
-                            {% else %}
-                                <span class="badge bg-danger">{{ log.status }}</span>
-                            {% endif %}
-                        </td>
-                        <td>{{ log.message or "-" }}</td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
 {% endblock %}

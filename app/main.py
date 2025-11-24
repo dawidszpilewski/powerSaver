@@ -1,49 +1,124 @@
-from pathlib import Path
-from datetime import date, datetime
+# app/main.py
+import socket
+from datetime import date, time  # <- upewnij się, że jest też `time`
 
-from fastapi import FastAPI, Depends, Request, Form, HTTPException
+import subprocess
+import platform
+
+from datetime import datetime, date
+from pathlib import Path
+from typing import List
+
+from fastapi import (
+    FastAPI,
+    Request,
+    Depends,
+    Form,
+    HTTPException,
+)
+from fastapi.responses import HTMLResponse
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
-from . import crud, schemas
-from .scheduler import start_scheduler, scan_network
+from . import crud, schemas, models
 from .config import settings
 from .winrm_utils import shutdown_via_winrm, get_winrm_info
-
+from .scheduler import start_scheduler, scan_network
 
 # --- Inicjalizacja bazy ---
 Base.metadata.create_all(bind=engine)
 
-# --- Aplikacja FastAPI ---
+# --- FastAPI + szablony + statyczne ---
 app = FastAPI()
 
-# Ścieżki oparte na położeniu pliku main.py
-BASE_DIR = Path(__file__).parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATES_DIR = BASE_DIR / "templates"
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
+# Stała informacyjna do wyświetlania w UI
+NIGHTLY_SHUTDOWN_HOUR = time(22, 0)  # 22:00
 
-# Statyczne pliki (favicon, logo, custom.js, itp.)
-app.mount(
-    "/static",
-    StaticFiles(directory=str(STATIC_DIR)),
-    name="static",
-)
-
-# Szablony Jinja2
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+def ping_host(target: str, timeout: int = 1) -> bool:
+    """
+    Prosty ping IP/hosta. Zwraca True jeśli host odpowiada, False jeśli nie.
+    """
+    if not target:
+        return False
+
+    param = "-n" if platform.system().lower().startswith("win") else "-c"
+    cmd = ["ping", param, "1", target]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+@app.post("/check-online")
+def check_online(db: Session = Depends(get_db)):
+    """
+    Szybkie sprawdzanie statusu online przez ping dla wszystkich komputerów.
+    Bez hasła admina, bo to tylko odczyt / diagnostyka.
+    """
+    computers = crud.get_all_computers(db)
+    result = {}
+
+    for c in computers:
+        if c.ip:
+            is_online = ping_host(c.ip)
+            result[c.id] = "online" if is_online else "offline"
+        else:
+            result[c.id] = "unknown"
+
+    # FastAPI samo zwróci JSON
+    return {"online": result}
+
+def ping_host(ip: str, timeout: float = 1.0) -> bool:
+    """
+    Prosty ping – 1 pakiet, mały timeout.
+    Nie zapisujemy nic w bazie, tylko sprawdzamy online/offline.
+    """
+    system = platform.system().lower()
+    if system == "windows":
+        # Windows: -n liczba pakietów, -w timeout w ms
+        cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+    else:
+        # Linux: -c liczba pakietów, -W timeout w sekundach
+        cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
+
+    try:
+        return subprocess.call(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) == 0
+    except Exception:
+        return False
+
+def is_online(ip: str, timeout: float = 0.2) -> bool:
+    """
+    Szybkie sprawdzenie, czy host odpowiada na porcie 5985 (WinRM).
+    Nic nie zapisuje do bazy – tylko zwraca True/False.
+    """
+    if not ip:
+        return False
+    try:
+        with socket.create_connection((ip, 5985), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
-# --- Start schedulerów przy starcie aplikacji ---
-@app.on_event("startup")
-async def on_startup():
-    # Harmonogram: skan + nocne wyłączanie
-    start_scheduler()
-
-
-# --- Endpoint: ręczne wyłączenie komputera ---
+# --- Endpoint: ręczne wyłączenie jednego komputera ---
 @app.post("/computers/{computer_id}/shutdown_manual")
 def shutdown_manual(
     computer_id: int,
@@ -51,10 +126,9 @@ def shutdown_manual(
     db: Session = Depends(get_db),
 ):
     """
-    Ręczne wyłączenie komputera przez WinRM.
-    Wymaga podania hasła ADMIN_TOGGLE_PASSWORD z .env.
+    Ręczne wyłączenie jednego komputera po WinRM.
+    Wymaga hasła ADMIN_TOGGLE_PASSWORD.
     """
-    # Sprawdzenie hasła admina
     if password != settings.ADMIN_TOGGLE_PASSWORD:
         raise HTTPException(status_code=403, detail="Niepoprawne haslo")
 
@@ -78,7 +152,7 @@ def shutdown_manual(
     return RedirectResponse("/", status_code=303)
 
 
-# --- Endpoint: debug WinRM dla jednego IP ---
+# --- Debug WinRM dla jednego IP ---
 @app.get("/debug-winrm/{ip}")
 def debug_winrm(ip: str):
     """
@@ -95,21 +169,17 @@ def debug_winrm(ip: str):
     }
 
 
-# --- Endpoint: ręczne skanowanie sieci ---
+# --- Ręczne skanowanie sieci ---
 @app.post("/scan-now")
-def scan_now(password: str = Form(...)):
-    """
-    Ręczne wyzwolenie skanowania sieci.
-    Wymaga hasła ADMIN_TOGGLE_PASSWORD.
-    """
-    if password != settings.ADMIN_TOGGLE_PASSWORD:
-        raise HTTPException(status_code=403, detail="Niepoprawne haslo")
-
-    scan_network()
+def scan_now(admin_password: str = Form(...), db: Session = Depends(get_db)):
+    if admin_password != settings.ADMIN_TOGGLE_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid admin password")
+    scan_network()   # lub wywołanie funkcji ze scheduler.py
     return RedirectResponse("/", status_code=303)
 
 
-# --- Endpoint: zmiana statusu komputera (managed / exception) ---
+
+# --- Zmiana statusu komputera (managed / exception) ---
 @app.post("/computers/{computer_id}/set_status")
 def set_status(
     computer_id: int,
@@ -119,8 +189,8 @@ def set_status(
 ):
     """
     Zmiana statusu komputera:
-    - managed
-    - exception
+    - managed   -> zarządzany, będzie wyłączany o 22:00
+    - exception -> wyjątek, nigdy nie wyłączamy automatycznie
     (status 'found' zostaje tylko z auto-skanu)
     """
     if password != settings.ADMIN_TOGGLE_PASSWORD:
@@ -138,19 +208,43 @@ def set_status(
 
     return RedirectResponse("/", status_code=303)
 
+@app.post("/computers/{computer_id}/exclude_today")
+def computer_exclude_today(
+    computer_id: int,
+    user: str = Form(...),
+    password: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    # Wymagane hasło admina
+    if settings.ADMIN_TOGGLE_PASSWORD and password != settings.ADMIN_TOGGLE_PASSWORD:
+        raise HTTPException(status_code=403, detail="Nieprawidłowe hasło administratora.")
 
-# --- Widok główny ---
-@app.get("/")
+    computer = crud.get_computer(db, computer_id)
+    if not computer:
+        raise HTTPException(status_code=404, detail="Komputer nie znaleziony.")
+
+    # Zapisujemy jednodniowy wyjątek – w reason trzymamy np. "Jan Kowalski"
+    crud.add_exclusion(db, computer_id=computer_id, exclusion_date=date.today(), reason=user)
+
+    return RedirectResponse(url="/", status_code=303)
+
+
+# --- Startup: scheduler ---
+@app.on_event("startup")
+async def on_startup():
+    # Uwaga: w trybie --reload zobaczysz ten log dwukrotnie (to normalne),
+    # w produkcji (bez reload) tylko raz.
+    start_scheduler()
+
+
+# --- Strona główna GUI ---
+@app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
-    """
-    Strona główna GUI:
-    - tabela wszystkich komputerów
-    - nowo znalezione (unapproved)
-    - ostatnie logi wyłączeń
-    """
     computers = crud.get_all_computers(db)
-    unapproved = crud.get_unapproved_computers(db)
-    logs = crud.get_recent_shutdown_logs(db, limit=20)
+
+    # czy admin password ustawione
+    admin_password_set = bool(settings.ADMIN_TOGGLE_PASSWORD)
+
     today = date.today()
 
     return templates.TemplateResponse(
@@ -158,11 +252,13 @@ def index(request: Request, db: Session = Depends(get_db)):
         {
             "request": request,
             "computers": computers,
-            "unapproved": unapproved,
-            "logs": logs,
+            "admin_password_set": admin_password_set,
             "today": today,
+            "shutdown_hour": NIGHTLY_SHUTDOWN_HOUR,
         },
     )
+
+
 
 
 # --- Endpoint: "Nie wyłączaj dziś" ---
