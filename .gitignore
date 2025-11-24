@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Baza lokalna
+data/pc_manager.db
+
+# Sekrety / konfiguracja lokalna
+.env
+.env.*
